@@ -1,6 +1,6 @@
 # Renewal Risk Detection System
 
-A full-stack feature for the Residential Operating Platform (ROP) that identifies residents at risk of not renewing their leases, surfaces them in a React dashboard, and delivers renewal events to an external Revenue Management System (RMS) via webhooks with guaranteed delivery (retry + dead-letter queue).
+A full-stack feature for the Residential Operating Platform (ROP) that identifies residents at risk of not renewing their leases, surfaces them in a React dashboard, and delivers renewal events to an external Revenue Management System (RMS) via webhooks with automatic retry logic and dead-letter queue for failed deliveries.
 
 ---
 
@@ -256,16 +256,17 @@ console.log('Expected: sha256=' + sig);
 
 ### Retry behavior
 
-The retry worker polls every 5 seconds. Backoff schedule:
-| Attempt | Delay before retry |
-|---------|-------------------|
-| 1 → 2   | 1 second          |
-| 2 → 3   | 2 seconds         |
-| 3 → 4   | 4 seconds         |
-| 4 → 5   | 8 seconds         |
-| 5 (final) → DLQ | 16 seconds |
+The retry worker polls every 5 seconds for deliveries with `nextRetryAt <= NOW()`. When a delivery fails, it uses exponential backoff:
 
-After 5 failed attempts, the delivery is moved to DLQ status with the reason stored in `dlq_reason`.
+| Attempt | Status after fail | Wait before next retry |
+|---------|-------------------|----------------------|
+| 1 (first POST) | FAILED | 1 second |
+| 2 | FAILED | 2 seconds |
+| 3 | FAILED | 4 seconds |
+| 4 | FAILED | 8 seconds |
+| 5 | FAILED → DLQ | (no more retries) |
+
+After 5 failed attempts, the delivery is moved to DLQ status with the reason stored in `dlq_reason`. No automatic retries occur after this point.
 
 To simulate failures: set `RMS_WEBHOOK_URL` to a URL that returns 5xx or doesn't respond, then trigger an event and watch the `webhook-status` endpoint update.
 
@@ -304,14 +305,27 @@ The seed creates **Park Meadows Apartments** (Denver, CO) with 20 units and 4 re
 ### Why Prisma?
 Strong TypeScript integration, readable schema, and automatic migration tracking. The `@unique` constraint on `(residentId, asOfDate)` in `renewal_risk_scores` gives us idempotent upserts for free.
 
-### Why in-process retry worker?
-For a take-home exercise, a `setInterval` polling loop avoids infrastructure dependencies (no Redis, no BullMQ, no separate worker process). In production I'd use a proper job queue (BullMQ + Redis) or a platform-level scheduler (e.g., pg_cron + a dedicated worker pod) to ensure retries survive process restarts.
+### Why in-process workers?
+The job worker and retry worker run as `setInterval` polling loops in the Express process. This approach avoids infrastructure dependencies for a take-home exercise.
 
-### Idempotency for AUTO webhook events
-The plan requires a partial unique index on `renewal_events(resident_id, as_of_date) WHERE trigger_source = 'AUTO'`. Prisma doesn't support partial indexes natively, so this is enforced at the application layer in `webhookService.ts` via `autoEventExists()` before creating a new AUTO event. A raw SQL migration can add the actual DB constraint for production hardening.
+**Limitation:** If the Node process crashes, the workers stop (but all data remains safe in the database). Jobs and deliveries resume processing once the server restarts. This is acceptable for development/testing but **NOT suitable for production**.
 
-### Synchronous risk calculation
-Scores are computed in the same HTTP request rather than a background job. This is acceptable for the expected dataset size (single property, dozens of residents). For thousands of properties, this should be moved to an async job queue with progress tracking.
+For production, use:
+- A dedicated worker process (separate Node.js service with its own lifecycle)
+- Redis job queue (BullMQ)
+- Cloud Functions/Lambda
+- Kubernetes CronJob/Deployment
+- pg_cron with a dedicated worker pod
+
+This ensures background tasks continue even if the API server is down.
+
+### Webhook event idempotency
+When triggering a webhook event, we check if one already exists for that resident on that date using a unique constraint (idempotency key: residentId + asOfDate). This prevents duplicate events from being created if the endpoint is called twice. Events are created inside a database transaction to ensure consistency.
+
+### Asynchronous batch risk calculation
+Risk scoring runs via a background job worker. POST `/calculate` returns 202 (accepted) immediately with a jobId. The job worker picks it up asynchronously (polled every 5 seconds) and computes scores. The frontend tracks progress by polling `/latest-job` status. This pattern keeps the API responsive for large resident lists.
+
+The job worker runs as an in-process `setInterval` loop (same limitation as the retry worker — stops if the server crashes but data persists). For production, run workers in a separate service.
 
 ### UUIDs
 Using `uuid` v4 (random) for all IDs. The plan mentions UUIDv7 (time-sortable), which is preferable in production for index locality and natural ordering — requires Node 20+ or a library like `uuidv7`.
@@ -333,7 +347,7 @@ A lease with `lease_end_date` in the past results in `daysToExpiry = 0`, giving 
 If `unit_pricing` has no rows for the unit, `marketRent = null` and the rent-growth signal is skipped (0/15 points, `rentGrowthAboveMarket = false`). The score is calculated on the remaining 85 points and normalized within the same tier thresholds. This is documented in the response payload.
 
 ### Batch job triggered twice simultaneously (concurrent runs)
-Risk score writes use `prisma.renewalRiskScore.upsert()` on the unique key `(residentId, asOfDate)`. Concurrent upserts for the same key will serialize at the database level via the unique constraint — the last writer wins, but the result is idempotent. For AUTO webhook events, `autoEventExists()` checks before creating a new event; a partial unique index on `(resident_id, as_of_date) WHERE trigger_source = 'AUTO'` can enforce this at the DB level in production.
+Calling `/calculate` twice with the same `asOfDate` reuses the existing job (doesn't create a duplicate). The unique constraint on `idempotencyKey` prevents duplicate jobs. Risk score writes use `upsert()` on the unique key `(residentId, asOfDate)` — concurrent upserts serialize at the DB level. For AUTO webhook events, `autoEventExists()` checks before creating a new event; a partial unique index on `(resident_id, as_of_date) WHERE trigger_source = 'AUTO'` enforces this at the DB level in production.
 
 ### Webhook HMAC signature validation
 The backend signs every payload with `HMAC-SHA256` using `WEBHOOK_SECRET` and sends the signature as `X-RMS-Signature: sha256=<hex>`. The RMS should:
@@ -341,3 +355,33 @@ The backend signs every payload with `HMAC-SHA256` using `WEBHOOK_SECRET` and se
 2. Compute `HMAC-SHA256(body, secret)`
 3. Compare with the received signature using a constant-time comparison
 4. Reject requests where signatures don't match (return 401)
+
+---
+
+## Additional Documentation
+
+### Database Schema
+See [SCHEMA_DESIGN.md](SCHEMA_DESIGN.md) for detailed documentation of all tables, relationships, and design decisions regarding:
+- `renewal_risk_scores` — Risk calculation snapshots and idempotency strategy
+- `renewal_events` — Event tracking and trigger source differentiation (AUTO vs MANUAL)
+- `webhook_delivery_state` — Delivery tracking with retry state and DLQ
+- `batch_jobs` — Batch job tracking with idempotency key strategy
+- Indexes and query optimization
+- Entity relationships and constraints
+
+### System Architecture
+See [ARCHITECTURE.md](ARCHITECTURE.md) for:
+- Detailed component architecture
+- Data flow diagrams (risk scoring, webhook delivery)
+- Deployment patterns (dev vs production)
+- Scaling considerations
+- Disaster recovery strategy
+- Monitoring and observability
+
+### Backend README
+See [backend/README.md](backend/README.md) for:
+- Backend-specific setup and configuration
+- Complete API endpoint documentation with request/response examples
+- Background worker details (Job Worker, Retry Worker)
+- Data integrity guarantees
+- Testing instructions
