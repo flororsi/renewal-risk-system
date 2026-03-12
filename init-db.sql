@@ -1,0 +1,3 @@
+-- Grant all privileges to rdp user
+ALTER ROLE rdp SUPERUSER CREATEDB CREATEROLE;
+GRANT ALL PRIVILEGES ON DATABASE rdp_db TO rdp;

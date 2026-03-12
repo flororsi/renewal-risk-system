@@ -1,0 +1,299 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-arm64-openssl-3.0.x", "darwin"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Starter tables (provided by the platform)
+// ---------------------------------------------------------------------------
+
+model Property {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  address   String?
+  city      String?
+  state     String?
+  zipCode   String?  @map("zip_code")
+  status    String   @default("active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  unitTypes       UnitType[]
+  units           Unit[]
+  residents       Resident[]
+  leases          Lease[]
+  residentLedger  ResidentLedger[]
+  renewalOffers   RenewalOffer[]
+  riskScores      RenewalRiskScore[]
+  renewalEvents   RenewalEvent[]
+  webhookDelivery WebhookDeliveryState[]
+  batchJobs       BatchJob[]
+
+  @@map("properties")
+}
+
+model UnitType {
+  id          String   @id @default(uuid())
+  propertyId  String   @map("property_id")
+  name        String
+  bedrooms    Int?
+  bathrooms   Decimal? @db.Decimal(3, 1)
+  squareFootage Int?   @map("square_footage")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  property Property @relation(fields: [propertyId], references: [id])
+  units    Unit[]
+
+  @@unique([propertyId, name])
+  @@map("unit_types")
+}
+
+model Unit {
+  id         String   @id @default(uuid())
+  propertyId String   @map("property_id")
+  unitTypeId String   @map("unit_type_id")
+  unitNumber String   @map("unit_number")
+  floor      Int?
+  status     String   @default("available")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  property   Property    @relation(fields: [propertyId], references: [id])
+  unitType   UnitType    @relation(fields: [unitTypeId], references: [id])
+  residents  Resident[]
+  leases     Lease[]
+  unitPricing UnitPricing[]
+
+  @@unique([propertyId, unitNumber])
+  @@map("units")
+}
+
+model UnitPricing {
+  id            String   @id @default(uuid())
+  unitId        String   @map("unit_id")
+  baseRent      Decimal  @map("base_rent") @db.Decimal(10, 2)
+  marketRent    Decimal  @map("market_rent") @db.Decimal(10, 2)
+  effectiveDate DateTime @map("effective_date") @db.Date
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  unit Unit @relation(fields: [unitId], references: [id])
+
+  @@unique([unitId, effectiveDate])
+  @@map("unit_pricing")
+}
+
+model Resident {
+  id          String   @id @default(uuid())
+  propertyId  String   @map("property_id")
+  unitId      String   @map("unit_id")
+  firstName   String   @map("first_name")
+  lastName    String   @map("last_name")
+  email       String?
+  phone       String?
+  status      String   @default("active")
+  moveInDate  DateTime? @map("move_in_date") @db.Date
+  moveOutDate DateTime? @map("move_out_date") @db.Date
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  property       Property         @relation(fields: [propertyId], references: [id])
+  unit           Unit             @relation(fields: [unitId], references: [id])
+  leases         Lease[]
+  residentLedger ResidentLedger[]
+  renewalOffers  RenewalOffer[]
+  riskScores     RenewalRiskScore[]
+  renewalEvents  RenewalEvent[]
+
+  @@map("residents")
+}
+
+model Lease {
+  id             String   @id @default(uuid())
+  propertyId     String   @map("property_id")
+  residentId     String   @map("resident_id")
+  unitId         String   @map("unit_id")
+  leaseStartDate DateTime @map("lease_start_date") @db.Date
+  leaseEndDate   DateTime @map("lease_end_date") @db.Date
+  monthlyRent    Decimal  @map("monthly_rent") @db.Decimal(10, 2)
+  leaseType      String   @default("fixed") @map("lease_type")
+  status         String   @default("active")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  property       Property         @relation(fields: [propertyId], references: [id])
+  resident       Resident         @relation(fields: [residentId], references: [id])
+  unit           Unit             @relation(fields: [unitId], references: [id])
+  residentLedger ResidentLedger[]
+  renewalOffers  RenewalOffer[]
+  riskScores     RenewalRiskScore[]
+
+  @@map("leases")
+}
+
+model ResidentLedger {
+  id              String   @id @default(uuid())
+  propertyId      String   @map("property_id")
+  residentId      String   @map("resident_id")
+  leaseId         String?  @map("lease_id")
+  transactionType String   @map("transaction_type")
+  chargeCode      String?  @map("charge_code")
+  amount          Decimal  @db.Decimal(10, 2)
+  transactionDate DateTime @map("transaction_date") @db.Date
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  property Property  @relation(fields: [propertyId], references: [id])
+  resident Resident  @relation(fields: [residentId], references: [id])
+  lease    Lease?    @relation(fields: [leaseId], references: [id])
+
+  @@map("resident_ledger")
+}
+
+model RenewalOffer {
+  id                String   @id @default(uuid())
+  propertyId        String   @map("property_id")
+  residentId        String   @map("resident_id")
+  leaseId           String   @map("lease_id")
+  renewalStartDate  DateTime @map("renewal_start_date") @db.Date
+  renewalEndDate    DateTime? @map("renewal_end_date") @db.Date
+  proposedRent      Decimal? @map("proposed_rent") @db.Decimal(10, 2)
+  offerExpirationDate DateTime? @map("offer_expiration_date") @db.Date
+  status            String   @default("pending")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  property Property @relation(fields: [propertyId], references: [id])
+  resident Resident @relation(fields: [residentId], references: [id])
+  lease    Lease    @relation(fields: [leaseId], references: [id])
+
+  @@map("renewal_offers")
+}
+
+// ---------------------------------------------------------------------------
+// New tables (candidate responsibility)
+// ---------------------------------------------------------------------------
+
+enum RiskTier {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum TriggerSource {
+  AUTO
+  MANUAL
+}
+
+enum DeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+  DLQ
+}
+
+enum BatchJobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model RenewalRiskScore {
+  id                      String   @id @default(uuid())
+  propertyId              String   @map("property_id")
+  residentId              String   @map("resident_id")
+  leaseId                 String   @map("lease_id")
+  riskScore               Int      @map("risk_score")
+  riskTier                RiskTier @map("risk_tier")
+  daysToExpiry            Int      @map("days_to_expiry")
+  missedRentPayments      Boolean  @map("missed_rent_payments")
+  noRenewalOfferYet       Boolean  @map("no_renewal_offer_yet")
+  rentGrowthAboveMarket   Boolean  @map("rent_growth_above_market")
+  signalsJson             Json     @map("signals_json")
+  asOfDate                DateTime @map("as_of_date") @db.Date
+  calculatedAt            DateTime @map("calculated_at")
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @updatedAt @map("updated_at")
+
+  property       Property       @relation(fields: [propertyId], references: [id])
+  resident       Resident       @relation(fields: [residentId], references: [id])
+  lease          Lease          @relation(fields: [leaseId], references: [id])
+  renewalEvents  RenewalEvent[]
+
+  @@unique([residentId, asOfDate])
+  @@index([propertyId, asOfDate(sort: Desc)])
+  @@index([propertyId, riskTier])
+  @@map("renewal_risk_scores")
+}
+
+model RenewalEvent {
+  id            String        @id @default(uuid())
+  propertyId    String        @map("property_id")
+  residentId    String        @map("resident_id")
+  riskScoreId   String        @map("risk_score_id")
+  eventType     String        @map("event_type")
+  triggerSource TriggerSource @map("trigger_source")
+  asOfDate      DateTime?     @map("as_of_date") @db.Date
+  payload       Json
+  triggeredAt   DateTime      @map("triggered_at")
+  createdAt     DateTime      @default(now()) @map("created_at")
+
+  property         Property              @relation(fields: [propertyId], references: [id])
+  resident         Resident              @relation(fields: [residentId], references: [id])
+  riskScore        RenewalRiskScore      @relation(fields: [riskScoreId], references: [id])
+  deliveryState    WebhookDeliveryState?
+
+  @@map("renewal_events")
+}
+
+model WebhookDeliveryState {
+  id                 String         @id @default(uuid())
+  eventId            String         @unique @map("event_id")
+  propertyId         String         @map("property_id")
+  targetUrl          String         @map("target_url")
+  status             DeliveryStatus @default(PENDING)
+  attemptCount       Int            @default(0) @map("attempt_count")
+  maxAttempts        Int            @default(5) @map("max_attempts")
+  lastAttemptAt      DateTime?      @map("last_attempt_at")
+  nextRetryAt        DateTime       @map("next_retry_at")
+  lastResponseStatus Int?           @map("last_response_status")
+  lastResponseBody   String?        @map("last_response_body")
+  dlqReason          String?        @map("dlq_reason")
+  createdAt          DateTime       @default(now()) @map("created_at")
+  updatedAt          DateTime       @updatedAt @map("updated_at")
+
+  property Property     @relation(fields: [propertyId], references: [id])
+  event    RenewalEvent @relation(fields: [eventId], references: [id])
+
+  @@index([status, nextRetryAt])
+  @@map("webhook_delivery_state")
+}
+
+model BatchJob {
+  id             String         @id @default(uuid())
+  propertyId     String         @map("property_id")
+  asOfDate       DateTime       @map("as_of_date") @db.Date
+  triggerSource  String         @default("AUTO") @map("trigger_source")
+  idempotencyKey String?        @unique @map("idempotency_key")
+  status         BatchJobStatus @default(PENDING)
+  startedAt      DateTime?      @map("started_at")
+  completedAt    DateTime?      @map("completed_at")
+  errorMessage   String?        @map("error_message")
+  totalResidents Int?           @map("total_residents")
+  flaggedCount   Int?           @map("flagged_count")
+  highCount      Int?           @map("high_count")
+  mediumCount    Int?           @map("medium_count")
+  lowCount       Int?           @map("low_count")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt      @map("updated_at")
+
+  property Property @relation(fields: [propertyId], references: [id])
+
+  @@index([status, createdAt])
+  @@index([propertyId, asOfDate(sort: Desc)])
+  @@map("batch_jobs")
+}
